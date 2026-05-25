@@ -128,7 +128,9 @@ async function sendMsg(webid, body) {
 
 // --- UI ---
 let CONTACTS_MAP = new Map()
-let OPEN = null   // canonical WebID of the open thread, or null for the list
+// Deep-link: ?to=<webid> (e.g. from the contacts app's Message button) opens
+// that conversation directly.
+let OPEN = (() => { const t = new URLSearchParams(location.search).get('to'); return t ? canonWebId(t) : null })()
 
 function toast(msg) {
   let t = document.querySelector('.toast')
