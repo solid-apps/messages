@@ -106,24 +106,70 @@ async function loadThread(threadUrl) {
   return msgs
 }
 
+// A pod's root from a WebID (its origin). Assumes pod root = WebID origin —
+// true for subdomain pods (e.g. <user>.solid.social); path-based pods would
+// need pim:storage discovery from the profile.
+function podRootOf(webid) { try { return new URL('/', webid).href } catch { return '' } }
+
+// WAC doc: owner full control, one peer WebID append-only.
+function aclDoc(ownerWebid, peerWebid) {
+  return {
+    '@context': { acl: 'http://www.w3.org/ns/auth/acl#' },
+    '@graph': [
+      { '@id': '#owner', '@type': 'acl:Authorization', 'acl:agent': { '@id': ownerWebid },
+        'acl:accessTo': { '@id': './' }, 'acl:default': { '@id': './' },
+        'acl:mode': [{ '@id': 'acl:Read' }, { '@id': 'acl:Write' }, { '@id': 'acl:Control' }] },
+      { '@id': '#peer', '@type': 'acl:Authorization', 'acl:agent': { '@id': peerWebid },
+        'acl:accessTo': { '@id': './' }, 'acl:default': { '@id': './' },
+        'acl:mode': [{ '@id': 'acl:Append' }] }
+    ]
+  }
+}
+
+// Open a channel so `webid` can deliver into my thread-with-them container:
+// ensure it exists and its .acl grants them acl:Append (+ me full). Idempotent.
+async function ensureChannel(webid) {
+  const container = new URL(keyOf(webid) + '/', CHATS).href
+  try { const r = await authFetch(container + '.acl'); if (r.ok) return } catch { /* provision below */ }
+  await authFetch(CHATS, { method: 'PUT', headers: { 'Content-Type': 'text/turtle' }, body: '' }).catch(() => {})
+  await authFetch(container, { method: 'PUT', headers: { 'Content-Type': 'text/turtle' }, body: '' }).catch(() => {})
+  await authFetch(container + '.acl', {
+    method: 'PUT', headers: { 'Content-Type': 'application/ld+json' },
+    body: JSON.stringify(aclDoc(myWebId(), canonWebId(webid)))
+  }).catch(() => {})
+}
+
+// Send: (1) record the message in my own thread-with-them container, then
+// (2) deliver it to their pod at /private/chats/<key(me)>/ — the container they
+// opened for me (acl:Append). Returns true if delivery succeeded. The local
+// record always happens; delivery needs them to have a channel open for me AND
+// my pod to be a reachable, globally-identified peer — so it no-ops (returns
+// false) on a localhost-only pod.
 async function sendMsg(webid, body) {
-  const thread = new URL(keyOf(webid) + '/', CHATS).href
   const now = new Date().toISOString()
-  const fname = now.replace(/[:.]/g, '-') + '-' + Math.random().toString(36).slice(2, 7) + '.jsonld'
   const doc = {
     '@context': 'https://www.w3.org/ns/activitystreams',
     type: 'Note', content: body, attributedTo: myWebId(), to: canonWebId(webid), published: now
   }
-  const target = new URL(fname, thread).href
-  const put = () => authFetch(target, { method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, body: JSON.stringify(doc) })
+  // (1) local record
+  const thread = new URL(keyOf(webid) + '/', CHATS).href
+  const fname = now.replace(/[:.]/g, '-') + '-' + Math.random().toString(36).slice(2, 7) + '.jsonld'
+  const put = () => authFetch(new URL(fname, thread).href, { method: 'PUT', headers: { 'Content-Type': 'application/ld+json' }, body: JSON.stringify(doc) })
   let res = await put()
   if (!res.ok && (res.status === 404 || res.status === 409)) {
-    // Create the chats container + this thread, then retry once.
     await authFetch(CHATS, { method: 'PUT', headers: { 'Content-Type': 'text/turtle' }, body: '' }).catch(() => {})
     await authFetch(thread, { method: 'PUT', headers: { 'Content-Type': 'text/turtle' }, body: '' }).catch(() => {})
     res = await put()
   }
-  if (!res.ok) throw new Error(`send failed (${res.status})`)
+  if (!res.ok) throw new Error(`save failed (${res.status})`)
+  // (2) deliver to their pod
+  let delivered = false
+  try {
+    const target = podRootOf(webid) + 'private/chats/' + keyOf(myWebId()) + '/'
+    const d = await authFetch(target, { method: 'POST', headers: { 'Content-Type': 'application/ld+json' }, body: JSON.stringify(doc) })
+    delivered = d.ok
+  } catch { /* undelivered — saved locally */ }
+  return delivered
 }
 
 // --- UI ---
@@ -202,8 +248,10 @@ async function renderThread(webid) {
       <textarea class="c-body" rows="1" placeholder="Message…"></textarea>
       <button class="c-send">Send</button>
     </div>
-    <p class="hint muted">v1 stores your side on your pod; delivery to the other person comes later.</p>`
+    <p class="hint muted">Delivered to their pod if they've opened a channel for you; otherwise saved locally.</p>`
   appEl.querySelector('.back').onclick = () => { OPEN = null; render() }
+  // Open a channel so they can deliver replies into my thread-with-them.
+  ensureChannel(webid).catch(() => {})
 
   const msgsEl = appEl.querySelector('.messages')
   const paint = async () => {
@@ -229,7 +277,7 @@ async function renderThread(webid) {
     const text = body.value.trim()
     if (!text) return
     send.disabled = true
-    try { await sendMsg(webid, text); body.value = ''; await paint() }
+    try { const delivered = await sendMsg(webid, text); body.value = ''; await paint(); toast(delivered ? 'delivered' : 'saved (not delivered)') }
     catch (e) { toast(String(e.message || e)) }
     finally { send.disabled = false }
   }

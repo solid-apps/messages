@@ -34,12 +34,26 @@ don't become two threads) and then **base64url**-encode it. base64url is
 reversible, so listing `/private/chats/` and decoding the keys gives the roster
 back — no side-index needed. Contacts supplies the display name.
 
-## Status
+## Delivery (append-ACL)
 
-**v1 stores your side locally.** Sending appends to the per-contact thread on
-your pod; it doesn't yet *reach* the other person. Delivery is a separate
-transport layer (per-contact append-ACL, Nostr DM, …) that writes into this
-same store — deliberately decoupled from where the messages live.
+Sending does two things: it **records** the message in your own thread-with-them
+container, and it **delivers** by POSTing the message to the recipient's pod at
+`/private/chats/<base64url(your WebID)>/` — a container they opened for you.
+
+"Opening a channel" for a contact means writing a `.acl` on your
+`/private/chats/<them>/` container that grants **their WebID `acl:Append`** (and
+you full control). The app does this automatically when you open a conversation,
+so replies can be delivered back to you. Append-only means a peer can drop
+messages in but can't read your copy or anything else private.
+
+Verified against JSS 0.0.201: a granted WebID can append (201), anonymous is
+denied (401), the sender can't read the container (403), and the grant is scoped
+to that one container (403 elsewhere).
+
+**Reachability caveat:** delivery needs *both* pods to be internet-reachable
+with globally-resolvable WebIDs + OIDC issuers. On a `localhost`-only pod (e.g.
+the Android app) delivery no-ops — the message is still saved locally — until
+the pod is hosted with a real domain.
 
 ## License
 
