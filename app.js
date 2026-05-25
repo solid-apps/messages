@@ -174,9 +174,13 @@ async function sendMsg(webid, body) {
 
 // --- UI ---
 let CONTACTS_MAP = new Map()
-// Deep-link: ?to=<webid> (e.g. from the contacts app's Message button) opens
-// that conversation directly.
-let OPEN = (() => { const t = new URLSearchParams(location.search).get('to'); return t ? canonWebId(t) : null })()
+// Deep-link: an inbound `webid` intent (from the intent bus), or the legacy
+// ?to=<webid>, opens that conversation directly.
+let OPEN = (() => {
+  const i = window.intent && window.intent.receive && window.intent.receive()
+  const w = (i && i.type === 'webid' && i.value) || new URLSearchParams(location.search).get('to')
+  return w ? canonWebId(w) : null
+})()
 
 function toast(msg) {
   let t = document.querySelector('.toast')
